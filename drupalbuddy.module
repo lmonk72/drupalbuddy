@@ -1,0 +1,33 @@
+<?php
+/**
+ * @file
+ * Main module file for DrupalBuddy.
+ */
+
+/**
+ * Implements hook_permission().
+ */
+function drupalbuddy_permission() {
+  return array(
+    'administer drupalbuddy' => array(
+      'title' => t('Administer DrupalBuddy'),
+      'description' => t('Access the DrupalBuddy unused items report.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function drupalbuddy_menu() {
+  $items = array();
+  $items['admin/reports/drupalbuddy'] = array(
+    'title' => 'DrupalBuddy Unused Items',
+    'description' => 'Report of unused Views, blocks, and modules.',
+    'page callback' => 'drupalbuddy_report_page',
+    'access arguments' => array('administer drupalbuddy'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'drupalbuddy.admin.inc',
+  );
+  return $items;
+}

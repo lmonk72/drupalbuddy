@@ -1,0 +1,5 @@
+name = DrupalBuddy
+core = 7.x
+description = Provides a report to help identify unused Views, blocks, and modules.
+package = Administration
+version = 7.x-1.0
