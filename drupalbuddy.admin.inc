@@ -69,7 +69,7 @@ function drupalbuddy_unused_views_report() {
 
   // Get all enabled views from {views_view}.
   if (module_exists('views')) {
-    $result = db_query("SELECT name, human_name FROM {views_view}");
+    $result = db_query("SELECT name, human_name FROM {views_view} ORDER BY name ASC");
     foreach ($result as $row) {
       $view_name = $row->name;
       // Check if this view is used in a block or menu.
@@ -96,14 +96,15 @@ function drupalbuddy_unused_views_report() {
  * Helper: Find unused Blocks.
  */
 function drupalbuddy_unused_blocks_report() {
-  $header = array(t('Block'), t('Region'), t('Operations'));
+  $header = array(t('Block'), t('Status'), t('Operations'));
   $rows = array();
   $theme = 'commsdealer';
   // Show blocks for the theme where status = 0 and region = '-1' (unassigned/disabled blocks).
-  $result = db_query("SELECT module, delta, region FROM {block} WHERE theme = :theme AND status = 0 AND region = '-1'", array(':theme' => $theme));
+  $result = db_query("SELECT module, delta, region FROM {block} WHERE theme = :theme AND status = 0 AND region = '-1' ORDER BY module ASC, delta ASC", array(':theme' => $theme));
   foreach ($result as $row) {
     $block_name = $row->module . ':' . $row->delta;
-    $region = $row->region;
+    // Instead of showing region '-1', display 'Unused'.
+    $region = ($row->region === '-1') ? t('Unused') : $row->region;
     // Build the edit and delete links for the block config page.
     $edit_link = l(t('Edit'), 'admin/structure/block/manage/' . $row->module . '/' . $row->delta . '/configure', array('query' => array('theme' => $theme)));
     $delete_link = l(t('Delete'), 'admin/structure/block/manage/' . $row->module . '/' . $row->delta . '/delete', array('query' => array('theme' => $theme)));
@@ -120,7 +121,9 @@ function drupalbuddy_unused_modules_report() {
   $header = array(t('Module'), t('Status'));
   $rows = array();
   $enabled = module_list();
-  foreach ($enabled as $module) {
+  $enabled_sorted = $enabled;
+  sort($enabled_sorted, SORT_STRING | SORT_FLAG_CASE);
+  foreach ($enabled_sorted as $module) {
     // Skip core modules.
     if (in_array($module, array('system', 'user', 'field', 'filter', 'node', 'block', 'views', 'views_ui'))) continue;
     // Check if module provides blocks, views, or menu items.
