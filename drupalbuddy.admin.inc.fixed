@@ -517,8 +517,9 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
               try {
                 // Load submission properly using the Webform API with the correct nid
                 $submission = webform_get_submission($nid, $sid);
-                  if ($submission && isset($submission->sid)) {
-                  // Delete using Webform's proper API function - requires node and submission objects
+                
+                if ($submission && isset($submission->sid)) {
+                  // Delete using Webform's proper API function - pass node and submission objects
                   webform_submission_delete($node, $submission);
                   $deleted++;
                   
@@ -527,7 +528,7 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
                     array('@sid' => $sid, '@nid' => $nid), WATCHDOG_INFO);
                 }
                 else {
-                  // Fallback: Direct database deletion if API approach doesn't work properly
+                  // Submission could not be loaded properly, use direct database approach
                   db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
                   db_delete('webform_submissions')->condition('sid', $sid)->execute();
                   $deleted++;
@@ -537,13 +538,24 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
                 }
               } 
               catch (Exception $e) {
+                // Log the exception message to help debugging
+                watchdog('drupalbuddy', 'Exception during submission deletion: @message', 
+                  array('@message' => $e->getMessage()), WATCHDOG_ERROR);
+                  
                 // If API approach fails, try direct database deletion as final fallback
-                db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
-                db_delete('webform_submissions')->condition('sid', $sid)->execute();
-                $deleted++;
-                
-                watchdog('drupalbuddy', 'Failed with API but deleted via direct database query: @sid', 
-                  array('@sid' => $sid), WATCHDOG_WARNING);
+                try {
+                  db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
+                  db_delete('webform_submissions')->condition('sid', $sid)->execute();
+                  $deleted++;
+                  
+                  watchdog('drupalbuddy', 'Failed with API but deleted via direct database query: @sid', 
+                    array('@sid' => $sid), WATCHDOG_WARNING);
+                }
+                catch (Exception $e2) {
+                  // If even direct database deletion fails, log the error
+                  watchdog('drupalbuddy', 'Failed to delete submission @sid: @message', 
+                    array('@sid' => $sid, '@message' => $e2->getMessage()), WATCHDOG_ERROR);
+                }
               }
             }
             else {
