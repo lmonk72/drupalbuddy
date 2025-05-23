@@ -9,6 +9,12 @@
  */
 function drupalbuddy_report_page() {
   $build = array();
+  
+  // Add local task tabs
+  $build['tabs'] = array(
+    '#theme' => 'menu_local_tasks',
+  );
+  
   $build['title'] = array(
     '#markup' => '<h2>' . t('DrupalBuddy: Unused Items Report') . '</h2>',
   );
@@ -140,4 +146,238 @@ function drupalbuddy_unused_modules_report() {
     $rows[] = array($module, $provides ? t('Provides functionality') : t('Possibly unused'));
   }
   return theme('table', array('header' => $header, 'rows' => $rows, 'caption' => t('Unused Modules')));
+}
+
+/**
+ * Page callback for exporting all webform registrations data with webform title.
+ */
+function drupalbuddy_webform_export_page() {
+  // Check if webform module is enabled
+  if (!module_exists('webform')) {
+    return array('#markup' => '<p>' . t('Webform module is not enabled.') . '</p>');
+  }
+  
+  // Load webform includes
+  module_load_include('inc', 'webform', 'includes/webform.submissions');
+  
+  $build = array();
+  $build['title'] = array(
+    '#markup' => '<h2>' . t('Export All Webform Registrations') . '</h2>',
+  );
+  $build['description'] = array(
+    '#markup' => '<p>' . t('Click the button below to export all webform registrations data, including the webform title for each record. The export will include all form fields and submission details in CSV format.') . '</p>',
+  );
+  $build['form'] = drupal_get_form('drupalbuddy_webform_export_form');
+  
+  return $build;
+}
+
+/**
+ * Form for exporting webform registrations.
+ */
+function drupalbuddy_webform_export_form($form, &$form_state) {
+  $form['export'] = array(
+    '#type' => 'submit',
+    '#value' => t('Export Webform Registrations'),
+    '#submit' => array('drupalbuddy_webform_export_form_submit'),
+  );
+  return $form;
+}
+
+/**
+ * Submit handler for exporting webform registrations.
+ */
+function drupalbuddy_webform_export_form_submit($form, &$form_state) {
+  // Start the batch export process
+  drupalbuddy_webform_export_batch();
+}
+
+/**
+ * Start batch process to export all webform registrations.
+ */
+function drupalbuddy_webform_export_batch() {
+  $batch = array(
+    'title' => t('Exporting Webform Registrations...'),
+    'operations' => array(
+      array('drupalbuddy_export_webform_batch_process', array()),
+    ),
+    'finished' => 'drupalbuddy_export_webform_batch_finished',
+    'file' => drupal_get_path('module', 'drupalbuddy') . '/drupalbuddy.admin.inc',
+  );
+  
+  batch_set($batch);
+  batch_process();
+}
+
+/**
+ * Batch process callback for exporting webform data.
+ */
+function drupalbuddy_export_webform_batch_process(&$context) {
+  // Load webform includes
+  module_load_include('inc', 'webform', 'includes/webform.submissions');
+  
+  if (empty($context['sandbox'])) {
+    // Initialize the sandbox
+    $context['sandbox']['progress'] = 0;
+    $context['sandbox']['current_node'] = 0;
+    $context['sandbox']['max'] = 0;
+    
+    // Get all nodes that have webforms
+    $query = db_select('node', 'n')
+      ->fields('n', array('nid', 'title'))
+      ->condition('n.status', 1); // Only published nodes
+    
+    // Join with webform table to ensure node has a webform
+    $query->join('webform', 'w', 'n.nid = w.nid');
+    
+    $result = $query->execute();
+    $context['sandbox']['webform_nodes'] = array();
+    
+    foreach ($result as $row) {
+      $context['sandbox']['webform_nodes'][$row->nid] = $row->title;
+      $context['sandbox']['max']++;
+    }
+    
+    if ($context['sandbox']['max'] == 0) {
+      $context['results']['error'] = t('No webform nodes found.');
+      $context['finished'] = 1;
+      return;
+    }
+    
+    // Initialize CSV data array
+    $context['results']['csv_data'] = array();
+    $context['results']['headers_set'] = FALSE;
+  }
+  
+  // Process nodes in batches
+  $limit = 5; // Process 5 nodes at a time
+  $webform_nodes = $context['sandbox']['webform_nodes'];
+  $node_ids = array_keys($webform_nodes);
+  $current_batch = array_slice($node_ids, $context['sandbox']['progress'], $limit);
+  
+  foreach ($current_batch as $nid) {
+    $node_title = $webform_nodes[$nid];
+    
+    // Load the node to get webform structure
+    $node = node_load($nid);
+    if (!$node || empty($node->webform)) {
+      $context['sandbox']['progress']++;
+      continue;
+    }
+    
+    // Get all submissions for this webform
+    $submissions = webform_get_submissions($nid);
+    
+    foreach ($submissions as $submission) {
+      $row_data = array();
+      $row_data['Webform Title'] = $node_title;
+      $row_data['Submission ID'] = $submission->sid;
+      $row_data['Submitted'] = date('Y-m-d H:i:s', $submission->submitted);
+      $row_data['User'] = !empty($submission->name) ? $submission->name : 'Anonymous';
+      $row_data['IP Address'] = $submission->remote_addr;
+      
+      // Add form component data
+      if (!empty($submission->data) && !empty($node->webform['components'])) {
+        foreach ($node->webform['components'] as $cid => $component) {
+          $component_name = $component['name'];
+          $component_value = '';
+          
+          if (isset($submission->data[$cid])) {
+            if (is_array($submission->data[$cid])) {
+              $component_value = implode(', ', $submission->data[$cid]);
+            } else {
+              $component_value = $submission->data[$cid];
+            }
+          }
+          
+          $row_data[$component_name] = $component_value;
+        }
+      }
+      
+      $context['results']['csv_data'][] = $row_data;
+    }
+    
+    $context['sandbox']['progress']++;
+  }
+  
+  // Update progress
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+}
+
+/**
+ * Batch finished callback for webform export.
+ */
+function drupalbuddy_export_webform_batch_finished($success, $results, $operations) {
+  if ($success) {
+    if (isset($results['error'])) {
+      drupal_set_message($results['error'], 'error');
+      return;
+    }
+    
+    if (empty($results['csv_data'])) {
+      drupal_set_message(t('No webform submissions found to export.'), 'warning');
+      return;
+    }
+    
+    // Generate CSV file
+    $csv_data = $results['csv_data'];
+    $filename = 'webform_registrations_export_' . date('Y-m-d_H-i-s') . '.csv';
+    $file_path = file_default_scheme() . '://exports';
+    
+    // Ensure the exports directory exists
+    file_prepare_directory($file_path, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+    $full_path = $file_path . '/' . $filename;
+    
+    // Create CSV content
+    $csv_content = '';
+    $headers = array();
+    
+    // Get all unique headers from all rows
+    foreach ($csv_data as $row) {
+      $headers = array_merge($headers, array_keys($row));
+    }
+    $headers = array_unique($headers);
+    
+    // Add header row
+    $csv_content .= '"' . implode('","', $headers) . '"' . "\n";
+    
+    // Add data rows
+    foreach ($csv_data as $row) {
+      $csv_row = array();
+      foreach ($headers as $header) {
+        $value = isset($row[$header]) ? $row[$header] : '';
+        // Escape quotes and wrap in quotes
+        $value = str_replace('"', '""', $value);
+        $csv_row[] = $value;
+      }
+      $csv_content .= '"' . implode('","', $csv_row) . '"' . "\n";
+    }
+      // Save the file temporarily
+    $file = file_save_data($csv_content, $full_path, FILE_EXISTS_REPLACE);
+    
+    if ($file) {
+      // Set session message for users who might get redirected back
+      $_SESSION['drupalbuddy_export_message'] = t('Export completed successfully! @count submissions exported.', array(
+        '@count' => count($csv_data),
+      ));
+      
+      // Force download of the generated file
+      drupal_add_http_header('Content-Type', 'text/csv; utf-8');
+      drupal_add_http_header('Content-Disposition', 'attachment; filename=' . $filename);
+      drupal_add_http_header('Content-Length', strlen($csv_content));
+      drupal_add_http_header('Cache-Control', 'must-revalidate, post-check=0, pre-check=0');
+      drupal_add_http_header('Pragma', 'public');
+      drupal_add_http_header('Expires', '0');
+      
+      // Output file content and end the request
+      print $csv_content;
+      drupal_exit();
+    } else {
+      drupal_set_message(t('Error creating export file.'), 'error');
+    }
+  } else {
+    drupal_set_message(t('An error occurred during the export process.'), 'error');
+  }
 }
