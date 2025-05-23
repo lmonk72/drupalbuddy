@@ -381,3 +381,140 @@ function drupalbuddy_export_webform_batch_finished($success, $results, $operatio
     drupal_set_message(t('An error occurred during the export process.'), 'error');
   }
 }
+
+/**
+ * Page callback for the Webform Bulk Remove tool.
+ * Provides a form to upload a CSV and process removals/bans.
+ */
+function drupalbuddy_webform_bulk_remove_page() {
+  $form = drupal_get_form('drupalbuddy_webform_bulk_remove_form');
+  return array(
+    'title' => array('#markup' => '<h2>' . t('Webform Bulk Remove & Ban') . '</h2>'),
+    'desc' => array('#markup' => '<p>' . t('Upload a CSV file with columns SID and IP Address. Each IP will be banned and the webform submission with the given SID will be deleted.') . '</p>'),
+    'form' => $form,
+  );
+}
+
+/**
+ * Form for uploading the CSV file for bulk removal/ban.
+ */
+function drupalbuddy_webform_bulk_remove_form($form, &$form_state) {
+  $form = array();
+  // Required for file uploads
+  $form['#attributes'] = array('enctype' => 'multipart/form-data');
+  
+  $form['csv_file'] = array(
+    '#type' => 'file',
+    '#title' => t('CSV File'),
+    '#description' => t('Upload a CSV file with columns: SID, IP Address.'),
+  );
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Process CSV'),
+  );
+  
+  return $form;
+}
+
+/**
+ * Validate handler for the CSV upload form.
+ */
+function drupalbuddy_webform_bulk_remove_form_validate($form, &$form_state) {
+  // Check if a file was uploaded
+  if (empty($_FILES['files']['name']['csv_file'])) {
+    form_set_error('csv_file', t('Please upload a CSV file.'));
+    return;
+  }
+  
+  // Validate file extension
+  $validators = array('file_validate_extensions' => array('csv'));
+  $file = file_save_upload('csv_file', $validators, FALSE, FILE_EXISTS_REPLACE);
+  
+  if (!$file) {
+    form_set_error('csv_file', t('The file must be a CSV file.'));
+    return;
+  }
+  
+  // Store the file for use in submit handler
+  $form_state['storage']['csv_file'] = $file;
+}
+
+/**
+ * Form submit handler for bulk remove/ban.
+ */
+function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
+  // Get the stored file from validation
+  if (isset($form_state['storage']['csv_file'])) {
+    $file = $form_state['storage']['csv_file'];
+    $filepath = drupal_realpath($file->uri);
+    
+    $handle = fopen($filepath, 'r');
+    if ($handle) {
+      $header = fgetcsv($handle);
+      $sid_idx = array_search('SID', $header);
+      $ip_idx = array_search('IP Address', $header);
+      
+      if ($sid_idx === FALSE || $ip_idx === FALSE) {
+        drupal_set_message(t('CSV must contain columns: SID and IP Address.'), 'error');
+        fclose($handle);
+        file_delete($file);
+        return;
+      }      $banned = 0;
+      $deleted = 0;
+      while (($row = fgetcsv($handle)) !== FALSE) {
+        // Skip empty rows
+        if (empty($row[$sid_idx]) || empty($row[$ip_idx])) {
+          continue;
+        }
+        
+        $sid = trim($row[$sid_idx]);
+        $ip = trim($row[$ip_idx]);        // Ban the IP (using Drupal 7's System module IP blocking)
+        if (!empty($ip)) {
+          // Check if the blocked_ips table exists
+          if (db_table_exists('blocked_ips')) {
+            // Check if IP is already blocked
+            if (!db_query("SELECT 1 FROM {blocked_ips} WHERE ip = :ip", array(':ip' => $ip))->fetchField()) {
+              // Block the IP
+              db_insert('blocked_ips')
+                ->fields(array(
+                  'ip' => $ip,
+                ))
+                ->execute();
+              $banned++;
+            }
+          } else {
+            drupal_set_message(t('The blocked_ips table does not exist. IPs will not be banned.'), 'warning');
+          }
+        }
+        
+        // Delete the webform submission by SID
+        if (!empty($sid) && module_exists('webform')) {
+          module_load_include('inc', 'webform', 'includes/webform.submissions');
+          $submission = webform_get_submission(NULL, $sid);
+          if ($submission) {
+            webform_submission_delete($submission->nid, $submission->sid);
+            $deleted++;
+          }
+        }
+      }
+      fclose($handle);
+      
+      // Remove the temporary file
+      file_delete($file);
+      
+      // Display results
+      drupal_set_message(t('Successfully processed CSV: @banned IP addresses banned and @deleted submissions deleted.', array(
+        '@banned' => $banned,
+        '@deleted' => $deleted,
+      )));
+    } 
+    else {
+      drupal_set_message(t('Could not open uploaded file.'), 'error');
+      file_delete($file);
+    }
+  }
+  else {
+    drupal_set_message(t('No file was uploaded or there was an error with the upload.'), 'error');
+  }
+}

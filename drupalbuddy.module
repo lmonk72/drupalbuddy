@@ -47,5 +47,14 @@ function drupalbuddy_menu() {
     'file' => 'drupalbuddy.admin.inc',
     'weight' => 0,
   );
+  $items['admin/reports/drupalbuddy/webform-bulk-remove'] = array(
+    'title' => 'Webform Bulk Remove',
+    'description' => 'Bulk remove webform submissions and ban IPs from a CSV.',
+    'page callback' => 'drupalbuddy_webform_bulk_remove_page',
+    'access arguments' => array('administer drupalbuddy'),
+    'type' => 132, // MENU_LOCAL_TASK
+    'file' => 'drupalbuddy.admin.inc',
+    'weight' => 10,
+  );
   return $items;
 }
