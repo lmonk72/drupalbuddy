@@ -1,6 +1,15 @@
 source_field,target_field,action
+nid,nid,ignore
 title,title,map
 body,body,map
+created,created,map
+changed,changed,map
+status,status,map
+uid,uid,map
+language,language,map
+comment,comment,map
+promote,promote,ignore
+sticky,sticky,ignore
 field_article_image,field_whitepaper_image,map
 field_article_category,field_whitepaper_category,map
 field_article_tags,field_whitepaper_keywords,map

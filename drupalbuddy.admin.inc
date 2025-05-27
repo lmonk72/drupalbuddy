@@ -669,13 +669,23 @@ function drupalbuddy_content_migration_form($form, &$form_state) {
   
   // Required for file uploads
   $form['#attributes'] = array('enctype' => 'multipart/form-data');
-  
-  $form['mapping_file'] = array(
+    $form['mapping_file'] = array(
     '#type' => 'file',
     '#title' => t('Field Mapping CSV File'),
     '#description' => t('Upload a CSV file with columns: source_field, target_field, action. Action should be "map" for fields to migrate or "ignore" for fields to skip.'),
   );
-    $form['preview'] = array(
+  
+  // Webform migration option - only show if webform module is enabled
+  if (module_exists('webform')) {
+    $form['migrate_webforms'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Migrate Webforms'),
+      '#description' => t('If checked, webforms attached to the source nodes will be copied to the new nodes, including all configuration, components, and submissions.'),
+      '#default_value' => TRUE,
+    );
+  }
+  
+  $form['preview'] = array(
     '#type' => 'submit',
     '#value' => t('Preview Mapping'),
     '#submit' => array('drupalbuddy_content_migration_preview_submit'),
@@ -894,6 +904,7 @@ function drupalbuddy_content_migration_execute_submit($form, &$form_state) {
     $specific_nids = ($migration_scope == 'specific' && isset($form_state['storage']['validated_nids'])) 
       ? $form_state['storage']['validated_nids'] 
       : array();
+    $migrate_webforms = !empty($form_state['values']['migrate_webforms']) ? $form_state['values']['migrate_webforms'] : FALSE;
     
     // Set up batch process
     $batch = array(
@@ -902,7 +913,7 @@ function drupalbuddy_content_migration_execute_submit($form, &$form_state) {
         '@target' => $target_type
       )),
       'operations' => array(
-        array('drupalbuddy_content_migration_batch_process', array($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids)),
+        array('drupalbuddy_content_migration_batch_process', array($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids, $migrate_webforms)),
       ),
       'finished' => 'drupalbuddy_content_migration_batch_finished',
       'file' => drupal_get_path('module', 'drupalbuddy') . '/drupalbuddy.admin.inc',
@@ -918,7 +929,7 @@ function drupalbuddy_content_migration_execute_submit($form, &$form_state) {
 /**
  * Batch process callback for content migration.
  */
-function drupalbuddy_content_migration_batch_process($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids, &$context) {
+function drupalbuddy_content_migration_batch_process($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids, $migrate_webforms, &$context) {
   if (empty($context['sandbox'])) {
     // Initialize the sandbox
     $context['sandbox']['progress'] = 0;
@@ -926,6 +937,9 @@ function drupalbuddy_content_migration_batch_process($mapping_data, $source_type
     
     // Use the passed mapping data directly
     $context['sandbox']['mapping'] = $mapping_data;
+    $context['sandbox']['source_type'] = $source_type;
+    $context['sandbox']['target_type'] = $target_type;
+    $context['sandbox']['migrate_webforms'] = $migrate_webforms;
     
     // Get nodes to migrate based on scope
     if ($migration_scope == 'specific' && !empty($specific_nids)) {
@@ -948,8 +962,13 @@ function drupalbuddy_content_migration_batch_process($mapping_data, $source_type
     
     $context['sandbox']['max'] = count($context['sandbox']['nodes']);
     $context['results']['migrated'] = 0;
-    $context['results']['errors'] = 0;
-  }
+    $context['results']['errors'] = 0;  }
+  
+  // Extract variables from context
+  $mapping = $context['sandbox']['mapping'];
+  $source_type = $context['sandbox']['source_type'];
+  $target_type = $context['sandbox']['target_type'];
+  $migrate_webforms = $context['sandbox']['migrate_webforms'];
   
   // Process nodes in batches
   $limit = 5; // Process 5 nodes at a time
@@ -963,10 +982,11 @@ function drupalbuddy_content_migration_batch_process($mapping_data, $source_type
         $context['results']['errors']++;
         continue;
       }
-      
-      // Create new node with target type
+        // Create new node with target type
       $new_node = new stdClass();
       $new_node->type = $target_type;
+      
+      // Set default values for core properties
       $new_node->uid = $source_node->uid;
       $new_node->created = $source_node->created;
       $new_node->changed = REQUEST_TIME;
@@ -976,15 +996,35 @@ function drupalbuddy_content_migration_batch_process($mapping_data, $source_type
       $new_node->sticky = $source_node->sticky;
       $new_node->language = $source_node->language;
       
+      // Define core node properties that shouldn't be overridden by mapping
+      $core_readonly_properties = array('nid', 'vid', 'type');
+      
       // Map fields according to mapping
-      foreach ($context['sandbox']['mapping'] as $source_field => $target_field) {
+      foreach ($mapping as $source_field => $target_field) {
+        // Skip readonly core properties
+        if (in_array($target_field, $core_readonly_properties)) {
+          continue;
+        }
+        
+        // Handle core node properties vs field properties differently
         if (isset($source_node->$source_field)) {
-          $new_node->$target_field = $source_node->$source_field;
+          // Check if it's a core property or a field
+          if (property_exists($source_node, $source_field)) {
+            // Core property - assign directly
+            $new_node->$target_field = $source_node->$source_field;
+          } else {
+            // Field property - copy field data structure
+            $new_node->$target_field = $source_node->$source_field;
+          }
         }
       }
-      
-      // Save the new node
+        // Save the new node
       node_save($new_node);
+      
+      // Migrate webform if it exists on the source node and the option is enabled
+      if ($migrate_webforms && module_exists('webform') && !empty($source_node->webform)) {
+        drupalbuddy_migrate_webform($source_node->nid, $new_node->nid);
+      }
       
       // Update the original node to unpublished to avoid duplicates
       $source_node->status = 0;
@@ -1031,15 +1071,43 @@ function drupalbuddy_content_migration_batch_finished($success, $results, $opera
 function drupalbuddy_get_content_type_fields($content_type) {
   $fields = array();
   
-  // Get base node fields
-  $fields['nid'] = array('type' => 'node', 'label' => 'Node ID');
-  $fields['title'] = array('type' => 'node', 'label' => 'Title');
-  $fields['body'] = array('type' => 'field', 'label' => 'Body');
-  $fields['path'] = array('type' => 'path', 'label' => 'URL path');
+  // Get core node properties from the node table
+  $fields['nid'] = array('type' => 'node_property', 'label' => 'Node ID');
+  $fields['vid'] = array('type' => 'node_property', 'label' => 'Version ID');
+  $fields['type'] = array('type' => 'node_property', 'label' => 'Content Type');
+  $fields['language'] = array('type' => 'node_property', 'label' => 'Language');
+  $fields['title'] = array('type' => 'node_property', 'label' => 'Title');
+  $fields['uid'] = array('type' => 'node_property', 'label' => 'Author ID');
+  $fields['status'] = array('type' => 'node_property', 'label' => 'Published Status');
+  $fields['created'] = array('type' => 'node_property', 'label' => 'Created Date');
+  $fields['changed'] = array('type' => 'node_property', 'label' => 'Modified Date');
+  $fields['comment'] = array('type' => 'node_property', 'label' => 'Comment Setting');
+  $fields['promote'] = array('type' => 'node_property', 'label' => 'Promoted to Front Page');
+  $fields['sticky'] = array('type' => 'node_property', 'label' => 'Sticky at Top');
+  $fields['tnid'] = array('type' => 'node_property', 'label' => 'Translation Node ID');
+  $fields['translate'] = array('type' => 'node_property', 'label' => 'Translation Flag');
+  $fields['uuid'] = array('type' => 'node_property', 'label' => 'UUID');
+  $fields['rh_action'] = array('type' => 'node_property', 'label' => 'Rabbit Hole Action');
+  $fields['rh_redirect'] = array('type' => 'node_property', 'label' => 'Rabbit Hole Redirect');
+  $fields['rh_redirect_response'] = array('type' => 'node_property', 'label' => 'Rabbit Hole Response');
+  
+  // Add body field if it exists for this content type
+  $body_instance = field_info_instance('node', 'body', $content_type);
+  if ($body_instance) {
+    $fields['body'] = array('type' => 'field', 'label' => 'Body');
+  }
+  
+  // Add path alias support
+  $fields['path'] = array('type' => 'path', 'label' => 'URL Path Alias');
   
   // Get Field API fields
   $instances = field_info_instances('node', $content_type);
   foreach ($instances as $field_name => $instance) {
+    // Skip body field as we already added it above
+    if ($field_name === 'body') {
+      continue;
+    }
+    
     $field_info = field_info_field($field_name);
     $fields[$field_name] = array(
       'type' => 'field',
@@ -1049,4 +1117,117 @@ function drupalbuddy_get_content_type_fields($content_type) {
   }
   
   return $fields;
+}
+
+/**
+ * Helper function to migrate webform from source node to target node.
+ */
+function drupalbuddy_migrate_webform($source_nid, $target_nid) {
+  // Check if webform module exists
+  if (!module_exists('webform')) {
+    return FALSE;
+  }
+  
+  // Load webform includes
+  module_load_include('inc', 'webform', 'includes/webform.submissions');
+  
+  try {
+    // Copy webform configuration from source to target
+    $webform_config = db_query("SELECT * FROM {webform} WHERE nid = :nid", 
+      array(':nid' => $source_nid))->fetchAssoc();
+    
+    if ($webform_config) {
+      // Remove the source nid and replace with target nid
+      unset($webform_config['nid']);
+      $webform_config['nid'] = $target_nid;
+      
+      // Insert the webform configuration for the new node
+      drupal_write_record('webform', $webform_config);
+      
+      // Copy webform components
+      $components = db_query("SELECT * FROM {webform_component} WHERE nid = :nid", 
+        array(':nid' => $source_nid));
+      
+      foreach ($components as $component) {
+        $component_array = (array) $component;
+        unset($component_array['nid']);
+        $component_array['nid'] = $target_nid;
+        
+        drupal_write_record('webform_component', $component_array);
+      }
+      
+      // Copy webform emails (conditional emails setup)
+      $emails = db_query("SELECT * FROM {webform_emails} WHERE nid = :nid", 
+        array(':nid' => $source_nid));
+      
+      foreach ($emails as $email) {
+        $email_array = (array) $email;
+        unset($email_array['nid']);
+        $email_array['nid'] = $target_nid;
+        
+        drupal_write_record('webform_emails', $email_array);
+      }
+      
+      // Copy webform roles (access control)
+      $roles = db_query("SELECT * FROM {webform_roles} WHERE nid = :nid", 
+        array(':nid' => $source_nid));
+      
+      foreach ($roles as $role) {
+        $role_array = (array) $role;
+        unset($role_array['nid']);
+        $role_array['nid'] = $target_nid;
+        
+        drupal_write_record('webform_roles', $role_array);
+      }
+      
+      // Copy webform submissions
+      $submissions = db_query("SELECT * FROM {webform_submissions} WHERE nid = :nid", 
+        array(':nid' => $source_nid));
+      
+      $submission_mapping = array(); // Track old SID to new SID mapping
+      
+      foreach ($submissions as $submission) {
+        $old_sid = $submission->sid;
+        $submission_array = (array) $submission;
+        unset($submission_array['nid']);
+        unset($submission_array['sid']); // Let it auto-increment
+        $submission_array['nid'] = $target_nid;
+        
+        drupal_write_record('webform_submissions', $submission_array);
+        $new_sid = $submission_array['sid']; // Get the new auto-incremented SID
+        
+        $submission_mapping[$old_sid] = $new_sid;
+        
+        // Copy submission data for this submission
+        $submission_data = db_query("SELECT * FROM {webform_submitted_data} WHERE sid = :sid", 
+          array(':sid' => $old_sid));
+        
+        foreach ($submission_data as $data) {
+          $data_array = (array) $data;
+          $data_array['nid'] = $target_nid;
+          $data_array['sid'] = $new_sid;
+          
+          drupal_write_record('webform_submitted_data', $data_array);
+        }
+      }
+      
+      watchdog('drupalbuddy', 'Migrated webform from node @source to node @target with @submissions submissions', 
+        array(
+          '@source' => $source_nid, 
+          '@target' => $target_nid,
+          '@submissions' => count($submission_mapping)
+        ), 
+        WATCHDOG_INFO);
+      
+      return TRUE;
+    }
+    
+  } catch (Exception $e) {
+    watchdog('drupalbuddy', 'Error migrating webform from @source to @target: @message', 
+      array('@source' => $source_nid, '@target' => $target_nid, '@message' => $e->getMessage()), 
+      WATCHDOG_ERROR);
+    return FALSE;
+  }
+  
+  return FALSE;
 }
