@@ -517,8 +517,9 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
               try {
                 // Load submission properly using the Webform API with the correct nid
                 $submission = webform_get_submission($nid, $sid);
-                  if ($submission && isset($submission->sid)) {
-                  // Delete using Webform's proper API function - requires node and submission objects
+                
+                if ($submission && isset($submission->sid)) {
+                  // Delete using Webform's proper API function - pass node and submission objects
                   webform_submission_delete($node, $submission);
                   $deleted++;
                   
@@ -527,7 +528,7 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
                     array('@sid' => $sid, '@nid' => $nid), WATCHDOG_INFO);
                 }
                 else {
-                  // Fallback: Direct database deletion if API approach doesn't work properly
+                  // Submission could not be loaded properly, use direct database approach
                   db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
                   db_delete('webform_submissions')->condition('sid', $sid)->execute();
                   $deleted++;
@@ -537,13 +538,24 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
                 }
               } 
               catch (Exception $e) {
+                // Log the exception message to help debugging
+                watchdog('drupalbuddy', 'Exception during submission deletion: @message', 
+                  array('@message' => $e->getMessage()), WATCHDOG_ERROR);
+                  
                 // If API approach fails, try direct database deletion as final fallback
-                db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
-                db_delete('webform_submissions')->condition('sid', $sid)->execute();
-                $deleted++;
-                
-                watchdog('drupalbuddy', 'Failed with API but deleted via direct database query: @sid', 
-                  array('@sid' => $sid), WATCHDOG_WARNING);
+                try {
+                  db_delete('webform_submitted_data')->condition('sid', $sid)->execute();
+                  db_delete('webform_submissions')->condition('sid', $sid)->execute();
+                  $deleted++;
+                  
+                  watchdog('drupalbuddy', 'Failed with API but deleted via direct database query: @sid', 
+                    array('@sid' => $sid), WATCHDOG_WARNING);
+                }
+                catch (Exception $e2) {
+                  // If even direct database deletion fails, log the error
+                  watchdog('drupalbuddy', 'Failed to delete submission @sid: @message', 
+                    array('@sid' => $sid, '@message' => $e2->getMessage()), WATCHDOG_ERROR);
+                }
               }
             }
             else {
@@ -582,4 +594,459 @@ function drupalbuddy_webform_bulk_remove_form_submit($form, &$form_state) {
   else {
     drupal_set_message(t('No file was uploaded or there was an error with the upload.'), 'error');
   }
+}
+
+/**
+ * Page callback for the Content Migration tool.
+ * Page callback for content migration.
+ *
+ * Provides a form to migrate content between content types with field mapping.
+ */
+function drupalbuddy_content_migration_page() {
+  $form = drupal_get_form('drupalbuddy_content_migration_form');
+  return array(
+    'title' => array('#markup' => '<h2>' . t('Content Migration') . '</h2>'),
+    'desc' => array('#markup' => '<p>' . t('Migrate content from one content type to another using a CSV field mapping file. The CSV should have columns: <strong>source_field</strong>, <strong>target_field</strong>, <strong>action</strong> (where action can be "map" or "ignore").') . '</p>' .
+      '<p>' . t('Sample CSV template files are available in the module directory: <code>content_migration_mapping_template.csv</code> and <code>basic_migration_example.csv</code>') . '</p>'),
+    'form' => $form,
+  );
+}
+
+/**
+ * Form for content migration with field mapping.
+ */
+function drupalbuddy_content_migration_form($form, &$form_state) {
+  $form = array();
+  
+  // Get all available content types
+  $content_types = node_type_get_types();
+  $type_options = array();
+  foreach ($content_types as $machine_name => $type) {
+    $type_options[$machine_name] = $type->name;
+  }
+  
+  $form['source_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Source Content Type'),
+    '#description' => t('Select the content type to migrate from.'),
+    '#options' => $type_options,
+    '#required' => TRUE,
+  );
+    $form['target_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Target Content Type'),
+    '#description' => t('Select the content type to migrate to.'),
+    '#options' => $type_options,
+    '#required' => TRUE,
+  );
+  
+  $form['migration_scope'] = array(
+    '#type' => 'radios',
+    '#title' => t('Migration Scope'),
+    '#description' => t('Choose whether to migrate all content or specific nodes.'),
+    '#options' => array(
+      'all' => t('Migrate all nodes of the source content type'),
+      'specific' => t('Migrate only specific node IDs'),
+    ),
+    '#default_value' => 'all',
+    '#required' => TRUE,
+  );
+  
+  $form['specific_nids'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Specific Node IDs'),
+    '#description' => t('Enter the node IDs to migrate, one per line or separated by commas. Example: 123, 456, 789 or one per line.'),
+    '#rows' => 5,
+    '#states' => array(
+      'visible' => array(
+        ':input[name="migration_scope"]' => array('value' => 'specific'),
+      ),
+      'required' => array(
+        ':input[name="migration_scope"]' => array('value' => 'specific'),
+      ),
+    ),
+  );
+  
+  // Required for file uploads
+  $form['#attributes'] = array('enctype' => 'multipart/form-data');
+  
+  $form['mapping_file'] = array(
+    '#type' => 'file',
+    '#title' => t('Field Mapping CSV File'),
+    '#description' => t('Upload a CSV file with columns: source_field, target_field, action. Action should be "map" for fields to migrate or "ignore" for fields to skip.'),
+  );
+    $form['preview'] = array(
+    '#type' => 'submit',
+    '#value' => t('Preview Mapping'),
+    '#submit' => array('drupalbuddy_content_migration_preview_submit'),
+    '#attributes' => array('class' => array('button')),
+  );
+  
+  $form['execute'] = array(
+    '#type' => 'submit',
+    '#value' => t('Execute Migration'),
+    '#submit' => array('drupalbuddy_content_migration_execute_submit'),
+    '#attributes' => array('class' => array('button-primary')),
+    '#prefix' => '<div style="margin-top: 10px;"><strong>' . t('Warning:') . '</strong> ' . t('This will create new nodes and unpublish the original content. Make sure to preview first!') . '</div>',
+  );
+  
+  // Show preview if available
+  if (isset($form_state['storage']['preview_data'])) {
+    $form['preview_results'] = array(
+      '#markup' => $form_state['storage']['preview_data'],
+      '#weight' => 10,
+    );
+  }
+  
+  return $form;
+}
+
+/**
+ * Validate handler for the content migration form.
+ */
+function drupalbuddy_content_migration_form_validate($form, &$form_state) {
+  // Check if source and target types are different
+  if ($form_state['values']['source_type'] == $form_state['values']['target_type']) {
+    form_set_error('target_type', t('Source and target content types must be different.'));
+  }
+  
+  // Validate specific node IDs if selected
+  if ($form_state['values']['migration_scope'] == 'specific') {
+    $specific_nids = $form_state['values']['specific_nids'];
+    
+    if (empty($specific_nids)) {
+      form_set_error('specific_nids', t('Please enter node IDs when using specific node migration.'));
+      return;
+    }
+    
+    // Parse node IDs (support both comma-separated and line-separated)
+    $nids = array();
+    $raw_nids = preg_split('/[\s,]+/', trim($specific_nids), -1, PREG_SPLIT_NO_EMPTY);
+    
+    foreach ($raw_nids as $nid) {
+      $nid = trim($nid);
+      if (!is_numeric($nid)) {
+        form_set_error('specific_nids', t('All node IDs must be numeric. Invalid ID: @nid', array('@nid' => $nid)));
+        return;
+      }
+      $nids[] = (int) $nid;
+    }
+    
+    // Validate that nodes exist and are of the correct type
+    $source_type = $form_state['values']['source_type'];
+    $existing_nodes = db_query("SELECT nid FROM {node} WHERE nid IN (:nids) AND type = :type", 
+      array(':nids' => $nids, ':type' => $source_type))->fetchCol();
+    
+    $missing_nodes = array_diff($nids, $existing_nodes);
+    if (!empty($missing_nodes)) {
+      form_set_error('specific_nids', t('The following node IDs do not exist or are not of type @type: @nids', 
+        array('@type' => $source_type, '@nids' => implode(', ', $missing_nodes))));
+      return;
+    }
+    
+    // Store validated node IDs
+    $form_state['storage']['validated_nids'] = $nids;
+  }
+  
+  // Check if a file was uploaded
+  if (empty($_FILES['files']['name']['mapping_file'])) {
+    form_set_error('mapping_file', t('Please upload a CSV mapping file.'));
+    return;
+  }
+  
+  // Validate file extension
+  $validators = array('file_validate_extensions' => array('csv'));
+  $file = file_save_upload('mapping_file', $validators, FALSE, FILE_EXISTS_REPLACE);
+  
+  if (!$file) {
+    form_set_error('mapping_file', t('The file must be a CSV file.'));
+    return;
+  }
+  
+  // Store the file for use in submit handler
+  $form_state['storage']['mapping_file'] = $file;
+}
+
+/**
+ * Submit handler for preview mapping.
+ */
+function drupalbuddy_content_migration_preview_submit($form, &$form_state) {
+  $form_state['rebuild'] = TRUE;
+  
+  if (isset($form_state['storage']['mapping_file'])) {
+    $file = $form_state['storage']['mapping_file'];
+    $filepath = drupal_realpath($file->uri);
+    
+    $handle = fopen($filepath, 'r');
+    if ($handle) {
+      $header = fgetcsv($handle);
+      $source_idx = array_search('source_field', $header);
+      $target_idx = array_search('target_field', $header);
+      $action_idx = array_search('action', $header);
+      
+      if ($source_idx === FALSE || $target_idx === FALSE || $action_idx === FALSE) {
+        drupal_set_message(t('CSV must contain columns: source_field, target_field, action.'), 'error');
+        fclose($handle);
+        return;
+      }
+      
+      $source_type = $form_state['values']['source_type'];
+      $target_type = $form_state['values']['target_type'];
+        // Get field info for both content types
+      $source_fields = drupalbuddy_get_content_type_fields($source_type);
+      $target_fields = drupalbuddy_get_content_type_fields($target_type);
+      
+      // Count nodes to migrate based on scope
+      if ($form_state['values']['migration_scope'] == 'specific' && isset($form_state['storage']['validated_nids'])) {
+        $source_count = count($form_state['storage']['validated_nids']);
+        $scope_text = t('specific nodes: ') . implode(', ', $form_state['storage']['validated_nids']);
+      } else {
+        $source_count = db_query("SELECT COUNT(*) FROM {node} WHERE type = :type", 
+          array(':type' => $source_type))->fetchField();
+        $scope_text = t('all nodes');
+      }
+      
+      $preview_html = '<h3>' . t('Migration Preview') . '</h3>';
+      $preview_html .= '<p><strong>' . t('Source:') . '</strong> ' . $source_type . ' (' . $source_count . ' ' . t('nodes') . ' - ' . $scope_text . ')</p>';
+      $preview_html .= '<p><strong>' . t('Target:') . '</strong> ' . $target_type . '</p>';
+      $preview_html .= '<h4>' . t('Field Mappings:') . '</h4>';
+      
+      $preview_html .= '<table class="table">';
+      $preview_html .= '<thead><tr><th>' . t('Source Field') . '</th><th>' . t('Target Field') . '</th><th>' . t('Action') . '</th><th>' . t('Status') . '</th></tr></thead>';
+      $preview_html .= '<tbody>';
+      
+      while (($row = fgetcsv($handle)) !== FALSE) {
+        if (empty($row[$source_idx])) continue;
+        
+        $source_field = trim($row[$source_idx]);
+        $target_field = trim($row[$target_idx]);
+        $action = trim($row[$action_idx]);
+        
+        $status = '';
+        $row_class = '';
+        
+        if ($action == 'ignore') {
+          $status = t('Will be ignored');
+          $row_class = 'warning';
+        } elseif ($action == 'map') {
+          if (!isset($source_fields[$source_field])) {
+            $status = t('Source field not found');
+            $row_class = 'error';
+          } elseif (!isset($target_fields[$target_field])) {
+            $status = t('Target field not found');
+            $row_class = 'error';
+          } else {
+            $status = t('Ready to map');
+            $row_class = 'success';
+          }
+        } else {
+          $status = t('Invalid action');
+          $row_class = 'error';
+        }
+        
+        $preview_html .= '<tr class="' . $row_class . '"><td>' . $source_field . '</td><td>' . $target_field . '</td><td>' . $action . '</td><td>' . $status . '</td></tr>';
+      }
+      
+      $preview_html .= '</tbody></table>';
+      $preview_html .= '<style>.success{background-color:#dff0d8;} .warning{background-color:#fcf8e3;} .error{background-color:#f2dede;}</style>';
+        $form_state['storage']['preview_data'] = $preview_html;
+      
+      // Store the mapping data for execute function
+      $handle2 = fopen($filepath, 'r');
+      $header2 = fgetcsv($handle2);
+      $source_idx2 = array_search('source_field', $header2);
+      $target_idx2 = array_search('target_field', $header2);
+      $action_idx2 = array_search('action', $header2);
+      
+      $mapping_data = array();
+      while (($row2 = fgetcsv($handle2)) !== FALSE) {
+        if (empty($row2[$source_idx2])) continue;
+        
+        $source_field = trim($row2[$source_idx2]);
+        $target_field = trim($row2[$target_idx2]);
+        $action = trim($row2[$action_idx2]);
+        
+        if ($action == 'map') {
+          $mapping_data[$source_field] = $target_field;
+        }
+      }
+      fclose($handle2);
+      $form_state['storage']['mapping_data'] = $mapping_data;
+      
+      fclose($handle);
+    }
+    
+    // Clean up the file after preview
+    file_delete($file);
+    unset($form_state['storage']['mapping_file']);
+  }
+}
+
+/**
+ * Submit handler for execute migration.
+ */
+function drupalbuddy_content_migration_execute_submit($form, &$form_state) {
+  if (isset($form_state['storage']['mapping_data'])) {
+    $mapping_data = $form_state['storage']['mapping_data'];
+    $source_type = $form_state['values']['source_type'];
+    $target_type = $form_state['values']['target_type'];
+    $migration_scope = $form_state['values']['migration_scope'];
+    $specific_nids = ($migration_scope == 'specific' && isset($form_state['storage']['validated_nids'])) 
+      ? $form_state['storage']['validated_nids'] 
+      : array();
+    
+    // Set up batch process
+    $batch = array(
+      'title' => t('Migrating content from @source to @target', array(
+        '@source' => $source_type, 
+        '@target' => $target_type
+      )),
+      'operations' => array(
+        array('drupalbuddy_content_migration_batch_process', array($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids)),
+      ),
+      'finished' => 'drupalbuddy_content_migration_batch_finished',
+      'file' => drupal_get_path('module', 'drupalbuddy') . '/drupalbuddy.admin.inc',
+    );
+    
+    batch_set($batch);
+    batch_process();
+  } else {
+    drupal_set_message(t('Please preview the mapping first before executing the migration.'), 'error');
+  }
+}
+
+/**
+ * Batch process callback for content migration.
+ */
+function drupalbuddy_content_migration_batch_process($mapping_data, $source_type, $target_type, $migration_scope, $specific_nids, &$context) {
+  if (empty($context['sandbox'])) {
+    // Initialize the sandbox
+    $context['sandbox']['progress'] = 0;
+    $context['sandbox']['current_node'] = 0;
+    
+    // Use the passed mapping data directly
+    $context['sandbox']['mapping'] = $mapping_data;
+    
+    // Get nodes to migrate based on scope
+    if ($migration_scope == 'specific' && !empty($specific_nids)) {
+      // Use specific node IDs
+      $context['sandbox']['nodes'] = $specific_nids;
+    } else {
+      // Get all nodes of source type
+      $query = db_select('node', 'n')
+        ->fields('n', array('nid'))
+        ->condition('n.type', $source_type)
+        ->orderBy('n.nid');
+      
+      $result = $query->execute();
+      $context['sandbox']['nodes'] = array();
+      
+      foreach ($result as $row) {
+        $context['sandbox']['nodes'][] = $row->nid;
+      }
+    }
+    
+    $context['sandbox']['max'] = count($context['sandbox']['nodes']);
+    $context['results']['migrated'] = 0;
+    $context['results']['errors'] = 0;
+  }
+  
+  // Process nodes in batches
+  $limit = 5; // Process 5 nodes at a time
+  $nodes = $context['sandbox']['nodes'];
+  $current_batch = array_slice($nodes, $context['sandbox']['progress'], $limit);
+  
+  foreach ($current_batch as $nid) {
+    try {
+      $source_node = node_load($nid);
+      if (!$source_node) {
+        $context['results']['errors']++;
+        continue;
+      }
+      
+      // Create new node with target type
+      $new_node = new stdClass();
+      $new_node->type = $target_type;
+      $new_node->uid = $source_node->uid;
+      $new_node->created = $source_node->created;
+      $new_node->changed = REQUEST_TIME;
+      $new_node->status = $source_node->status;
+      $new_node->comment = $source_node->comment;
+      $new_node->promote = $source_node->promote;
+      $new_node->sticky = $source_node->sticky;
+      $new_node->language = $source_node->language;
+      
+      // Map fields according to mapping
+      foreach ($context['sandbox']['mapping'] as $source_field => $target_field) {
+        if (isset($source_node->$source_field)) {
+          $new_node->$target_field = $source_node->$source_field;
+        }
+      }
+      
+      // Save the new node
+      node_save($new_node);
+      
+      // Update the original node to unpublished to avoid duplicates
+      $source_node->status = 0;
+      node_save($source_node);
+      
+      $context['results']['migrated']++;
+      
+      watchdog('drupalbuddy', 'Migrated node @nid from @source to @target (new nid: @new_nid)', 
+        array('@nid' => $nid, '@source' => $source_type, '@target' => $target_type, '@new_nid' => $new_node->nid), 
+        WATCHDOG_INFO);
+      
+    } catch (Exception $e) {
+      $context['results']['errors']++;
+      watchdog('drupalbuddy', 'Error migrating node @nid: @message', 
+        array('@nid' => $nid, '@message' => $e->getMessage()), WATCHDOG_ERROR);
+    }
+    
+    $context['sandbox']['progress']++;
+  }
+  
+  // Update progress
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+}
+
+/**
+ * Batch finished callback for content migration.
+ */
+function drupalbuddy_content_migration_batch_finished($success, $results, $operations) {
+  if ($success) {
+    drupal_set_message(t('Content migration completed successfully! @migrated nodes migrated, @errors errors.', array(
+      '@migrated' => $results['migrated'],
+      '@errors' => $results['errors'],
+    )));
+  } else {
+    drupal_set_message(t('An error occurred during the migration process.'), 'error');
+  }
+}
+
+/**
+ * Helper function to get fields for a content type.
+ */
+function drupalbuddy_get_content_type_fields($content_type) {
+  $fields = array();
+  
+  // Get base node fields
+  $fields['nid'] = array('type' => 'node', 'label' => 'Node ID');
+  $fields['title'] = array('type' => 'node', 'label' => 'Title');
+  $fields['body'] = array('type' => 'field', 'label' => 'Body');
+  $fields['path'] = array('type' => 'path', 'label' => 'URL path');
+  
+  // Get Field API fields
+  $instances = field_info_instances('node', $content_type);
+  foreach ($instances as $field_name => $instance) {
+    $field_info = field_info_field($field_name);
+    $fields[$field_name] = array(
+      'type' => 'field',
+      'label' => $instance['label'],
+      'field_type' => $field_info['type'],
+    );
+  }
+  
+  return $fields;
 }

@@ -1,0 +1,11 @@
+source_field,target_field,action
+title,title,map
+body,body,map
+field_article_image,field_whitepaper_image,map
+field_article_category,field_whitepaper_category,map
+field_article_tags,field_whitepaper_keywords,map
+field_author,field_whitepaper_author,map
+field_published_date,field_whitepaper_date,map
+field_article_summary,field_whitepaper_summary,map
+field_article_downloads,field_download_count,ignore
+field_internal_notes,field_internal_notes,ignore

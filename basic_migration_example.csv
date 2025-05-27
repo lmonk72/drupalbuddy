@@ -1,0 +1,9 @@
+source_field,target_field,action
+title,title,map
+body,body,map
+field_image,field_image,map
+field_tags,field_tags,map
+created,created,map
+status,status,map
+promote,promote,ignore
+sticky,sticky,ignore

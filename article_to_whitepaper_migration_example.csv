@@ -1,0 +1,10 @@
+source_field,target_field,action
+nid,nid,map
+title,title,map
+body,field_whitepaper_summary,map
+field_image,field_whitepaper_cover,map
+field_companies,field_companies,map
+created,created,map
+status,status,map
+promote,promote,ignore
+sticky,sticky,ignore
